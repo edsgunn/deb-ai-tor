@@ -1,0 +1,14 @@
+# Changes here will be overwritten by Copier
+_commit: v0.2.0
+_src_path: gh:alan-turing-institute/python-project-template
+coc: our_coc
+email: edwardcharlesgunn@gmail.com
+full_name: Edward Gunn
+license: BSD
+min_python_version: '3.10'
+org: edsgunn
+project_name: deb-ai-tor
+project_short_description: A great package.
+python_name: deb_ai_tor
+typing: no_typing
+url: https://github.com/edsgunn/deb-ai-tor
