@@ -75,28 +75,47 @@ class DebateMarket(ParallelEnv):
     # ------------------------------
     # PettingZoo API
     # ------------------------------
-    def reset(self, question: str, answers=None, seed=None, options=None):
+    def reset(
+        self, question: str, answers=None, seed=None, options=None, fixed_answers=None
+    ):
         self.step_count = 0
         self.answers = answers or []
-        self.q = np.zeros(len(self.answers), dtype=float)
-        self.holdings = {
-            agent: np.zeros(len(self.answers), dtype=float) for agent in self.agents
-        }
-        self.balances = {agent: 1.0 for agent in self.agents}
-        self.messages_all = []
-        self.messages_round = []
-        self.msg_counts.clear()
-
         self.answer_ids = []
         self.answer_id_to_idx = {}
+        self.q = np.zeros(len(self.answers), dtype=float)
+        # Allow explicit fixed_answers override, otherwise infer from answers
+        if fixed_answers is not None:
+            self.fixed_answers = fixed_answers
+        else:
+            self.fixed_answers = bool(answers)
+        # Generate answer IDs for all initial answers
         for i, ans in enumerate(self.answers):
             new_id = self._generate_short_id()
             while new_id in self.answer_id_to_idx:
                 new_id = self._generate_short_id()
             self.answer_ids.append(new_id)
             self.answer_id_to_idx[new_id] = i
-
-        observations = [question for _ in self.agents]
+        self.holdings = {
+            agent: {aid: 0.0 for aid in self.answer_ids} for agent in self.agents
+        }
+        self.balances = {agent: 1.0 for agent in self.agents}
+        self.messages_all = []
+        self.messages_round = []
+        self.msg_counts.clear()
+        observations = {
+            agent: {
+                "balance": self.balances[agent],
+                "holdings": {aid: self.holdings[agent][aid] for aid in self.answer_ids},
+                "prices": [],
+                "answers": [
+                    {"id": aid, "text": self.answers[self.answer_id_to_idx[aid]]}
+                    for aid in self.answer_ids
+                ],
+                "message_price": self.message_price(),
+                "messages": [],
+            }
+            for agent in self.agents
+        }
         infos = {agent: {} for agent in self.agents}
         return observations, infos
 
@@ -108,14 +127,13 @@ class DebateMarket(ParallelEnv):
     def _add_new_answer(self, ans_text, dq_by_agent=None):
         self.answers.append(ans_text)
         new_id = self._generate_short_id()
-        # Ensure uniqueness
         while new_id in self.answer_id_to_idx:
             new_id = self._generate_short_id()
         self.answer_ids.append(new_id)
         self.answer_id_to_idx[new_id] = len(self.answers) - 1
         self.q = np.append(self.q, 0.0)
         for ag in self.agents:
-            self.holdings[ag] = np.append(self.holdings[ag], 0.0)
+            self.holdings[ag][new_id] = 0.0
             if dq_by_agent is not None:
                 dq_by_agent[ag] = np.append(dq_by_agent[ag], 0.0)
         return new_id
@@ -142,7 +160,7 @@ class DebateMarket(ParallelEnv):
         del self.answer_id_to_idx[aid]
         self.q = np.delete(self.q, idx)
         for ag in self.agents:
-            self.holdings[ag] = np.delete(self.holdings[ag], idx)
+            del self.holdings[ag][aid]
         # Rebuild id->idx mapping
         self.answer_id_to_idx = {aid: i for i, aid in enumerate(self.answer_ids)}
 
@@ -154,7 +172,6 @@ class DebateMarket(ParallelEnv):
         dq_by_agent = {agent: np.zeros_like(self.q) for agent in self.agents}
         new_answers = {}
         new_msgs = []
-        # Collect buy requests for new answers separately
         buy_requests = []
 
         for agent, action_str in actions.items():
@@ -174,16 +191,17 @@ class DebateMarket(ParallelEnv):
                     case "sell_answer":
                         aid, qty = request["answer_id"], float(request["qty"])
                         idx = self.answer_id_to_idx.get(aid)
-                        if idx is not None and self.holdings[agent][idx] >= qty:
+                        if idx is not None and self.holdings[agent][aid] >= qty:
                             dq_by_agent[agent][idx] -= qty
                     case "buy_new_answer":
-                        ans_text, amount = (
-                            request["answer_text"],
-                            float(request["amount"]),
-                        )
-                        if ans_text not in new_answers:
-                            new_answers[ans_text] = []
-                        new_answers[ans_text].append((agent, amount))
+                        if not getattr(self, "fixed_answers", False):
+                            ans_text, amount = (
+                                request["answer_text"],
+                                float(request["amount"]),
+                            )
+                            if ans_text not in new_answers:
+                                new_answers[ans_text] = []
+                            new_answers[ans_text].append((agent, amount))
                     case "buy_message":
                         msg = request["msg"]
                         price = self.message_price()
@@ -193,14 +211,15 @@ class DebateMarket(ParallelEnv):
 
         # --- Create all new answers first ---
         new_answer_ids = {}
-        for ans_text in new_answers:
-            new_id = self._add_new_answer(ans_text, dq_by_agent)
-            new_answer_ids[ans_text] = new_id
-        # Add buy requests for new answers to the main buy_requests list
-        for ans_text, contribs in new_answers.items():
-            aid = new_answer_ids[ans_text]
-            for agent, amount in contribs:
-                buy_requests.append((agent, aid, amount))
+        if not getattr(self, "fixed_answers", False):
+            for ans_text in new_answers:
+                new_id = self._add_new_answer(ans_text, dq_by_agent)
+                new_answer_ids[ans_text] = new_id
+            # Add buy requests for new answers to the main buy_requests list
+            for ans_text, contribs in new_answers.items():
+                aid = new_answer_ids[ans_text]
+                for agent, amount in contribs:
+                    buy_requests.append((agent, aid, amount))
 
         # --- Process all buy requests together ---
         for agent, aid, amount in buy_requests:
@@ -214,17 +233,15 @@ class DebateMarket(ParallelEnv):
         for dq in dq_by_agent.values():
             total_dq += dq
 
-        # old_cost = self.cost(self.q)
-        # new_cost = self.cost(self.q + total_dq)
-        # total_cost = new_cost - old_cost
-
         for agent, dq in dq_by_agent.items():
             if not np.any(dq):
                 continue
             indiv_cost = self.cost(self.q + dq) - self.cost(self.q)
             if self.balances[agent] >= indiv_cost:
                 self.balances[agent] -= indiv_cost
-                self.holdings[agent] += dq
+                # Update holdings by answer_id
+                for aid, idx in self.answer_id_to_idx.items():
+                    self.holdings[agent][aid] += dq[idx]
             else:
                 # skip if insufficient balance
                 pass
@@ -236,32 +253,33 @@ class DebateMarket(ParallelEnv):
         self.messages_all.extend(new_msgs)
         self.msg_counts.append(len(new_msgs))
 
-        # Build observations
+        # Remove answers with zero holdings only if not fixed_answers
+        if not getattr(self, "fixed_answers", False):
+            to_remove = []
+            for idx, aid in enumerate(self.answer_ids):
+                total_holdings = sum(self.holdings[ag][aid] for ag in self.agents)
+                if total_holdings == 0:
+                    to_remove.append(idx)
+            # Remove in reverse order to avoid index shift
+            for idx in reversed(to_remove):
+                self._remove_answer(idx)
+
+        # Only include answers and holdings for currently active answer_ids
         prices = self.prices(self.q) if len(self.q) > 0 else np.array([])
         observations = {
             agent: {
                 "balance": self.balances[agent],
-                "holdings": self.holdings[agent].tolist(),
+                "holdings": {aid: self.holdings[agent][aid] for aid in self.answer_ids},
                 "prices": prices.tolist(),
                 "answers": [
                     {"id": aid, "text": self.answers[self.answer_id_to_idx[aid]]}
                     for aid in self.answer_ids
                 ],
                 "message_price": self.message_price(),
-                "messages": self.messages_round,  # only this round
+                "messages": self.messages_round,
             }
             for agent in self.agents
         }
-
-        # After all trades, remove answers with zero holdings
-        to_remove = []
-        for idx, aid in enumerate(self.answer_ids):
-            total_holdings = sum(self.holdings[ag][idx] for ag in self.agents)
-            if total_holdings == 0:
-                to_remove.append(idx)
-        # Remove in reverse order to avoid index shift
-        for idx in reversed(to_remove):
-            self._remove_answer(idx)
 
         terminations = {agent: False for agent in self.agents}
         truncations = {agent: False for agent in self.agents}
