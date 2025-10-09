@@ -1,5 +1,7 @@
 import json
 import math
+import random
+import string
 import uuid
 from collections import defaultdict, deque
 
@@ -51,7 +53,10 @@ class DebateMarket(ParallelEnv):
     # LMSR functions
     # ------------------------------
     def cost(self, q: np.ndarray) -> float:
-        return self.b * math.log(np.exp(q / self.b).sum())
+        # Numerically stable log-sum-exp
+        scaled_q = q / self.b
+        m = np.max(scaled_q)
+        return self.b * (m + math.log(np.exp(scaled_q - m).sum()))
 
     def prices(self, q: np.ndarray) -> np.ndarray:
         exp_q = np.exp(q / self.b)
@@ -82,21 +87,37 @@ class DebateMarket(ParallelEnv):
         self.messages_round = []
         self.msg_counts.clear()
 
-        self.answer_ids = [str(uuid.uuid4()) for _ in self.answers]
-        self.answer_id_to_idx = {aid: i for i, aid in enumerate(self.answer_ids)}
+        self.answer_ids = []
+        self.answer_id_to_idx = {}
+        for i, ans in enumerate(self.answers):
+            new_id = self._generate_short_id()
+            while new_id in self.answer_id_to_idx:
+                new_id = self._generate_short_id()
+            self.answer_ids.append(new_id)
+            self.answer_id_to_idx[new_id] = i
 
         observations = [question for _ in self.agents]
         infos = {agent: {} for agent in self.agents}
         return observations, infos
 
-    def _add_new_answer(self, ans_text):
+    def _generate_short_id(self, length=5):
+        # Generates a short, readable, human-friendly id
+        chars = string.ascii_uppercase + string.digits
+        return "".join(random.choices(chars, k=length))
+
+    def _add_new_answer(self, ans_text, dq_by_agent=None):
         self.answers.append(ans_text)
-        new_id = str(uuid.uuid4())
+        new_id = self._generate_short_id()
+        # Ensure uniqueness
+        while new_id in self.answer_id_to_idx:
+            new_id = self._generate_short_id()
         self.answer_ids.append(new_id)
         self.answer_id_to_idx[new_id] = len(self.answers) - 1
         self.q = np.append(self.q, 0.0)
         for ag in self.agents:
             self.holdings[ag] = np.append(self.holdings[ag], 0.0)
+            if dq_by_agent is not None:
+                dq_by_agent[ag] = np.append(dq_by_agent[ag], 0.0)
         return new_id
 
     def _max_shares_for_amount(self, idx, amount):
@@ -131,8 +152,10 @@ class DebateMarket(ParallelEnv):
         self.messages_round = []
 
         dq_by_agent = {agent: np.zeros_like(self.q) for agent in self.agents}
-        new_answers = defaultdict(list)  # text -> [(agent, qty)]
+        new_answers = {}
         new_msgs = []
+        # Collect buy requests for new answers separately
+        buy_requests = []
 
         for agent, action_str in actions.items():
             if not action_str:
@@ -145,25 +168,22 @@ class DebateMarket(ParallelEnv):
             for request in requests:
                 match request["type"]:
                     case "buy_answer":
-                        aid, amount = request["answer_id"], float(request["amount"])
-                        idx = self.answer_id_to_idx.get(aid)
-                        if idx is not None:
-                            max_qty = self._max_shares_for_amount(idx, amount)
-                            dq_by_agent[agent][idx] += max_qty
-
+                        buy_requests.append(
+                            (agent, request["answer_id"], float(request["amount"]))
+                        )
                     case "sell_answer":
                         aid, qty = request["answer_id"], float(request["qty"])
                         idx = self.answer_id_to_idx.get(aid)
                         if idx is not None and self.holdings[agent][idx] >= qty:
                             dq_by_agent[agent][idx] -= qty
-
                     case "buy_new_answer":
                         ans_text, amount = (
                             request["answer_text"],
                             float(request["amount"]),
                         )
+                        if ans_text not in new_answers:
+                            new_answers[ans_text] = []
                         new_answers[ans_text].append((agent, amount))
-
                     case "buy_message":
                         msg = request["msg"]
                         price = self.message_price()
@@ -171,11 +191,21 @@ class DebateMarket(ParallelEnv):
                             self.balances[agent] -= price
                             new_msgs.append((agent, msg))
 
-        # --- Handle new answers (deduplicate by text) ---
+        # --- Create all new answers first ---
+        new_answer_ids = {}
+        for ans_text in new_answers:
+            new_id = self._add_new_answer(ans_text, dq_by_agent)
+            new_answer_ids[ans_text] = new_id
+        # Add buy requests for new answers to the main buy_requests list
         for ans_text, contribs in new_answers.items():
-            new_id = self._add_new_answer(ans_text)
-            idx = self.answer_id_to_idx[new_id]
+            aid = new_answer_ids[ans_text]
             for agent, amount in contribs:
+                buy_requests.append((agent, aid, amount))
+
+        # --- Process all buy requests together ---
+        for agent, aid, amount in buy_requests:
+            idx = self.answer_id_to_idx.get(aid)
+            if idx is not None:
                 max_qty = self._max_shares_for_amount(idx, amount)
                 dq_by_agent[agent][idx] += max_qty
 
