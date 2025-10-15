@@ -75,19 +75,15 @@ class DebateMarket(ParallelEnv):
     # ------------------------------
     # PettingZoo API
     # ------------------------------
-    def reset(
-        self, question: str, answers=None, seed=None, options=None, fixed_answers=None
-    ):
+    def reset(self, question: str, answers=None, seed=None, options=None):
         self.step_count = 0
         self.answers = answers or []
         self.answer_ids = []
         self.answer_id_to_idx = {}
         self.q = np.zeros(len(self.answers), dtype=float)
-        # Allow explicit fixed_answers override, otherwise infer from answers
-        if fixed_answers is not None:
-            self.fixed_answers = fixed_answers
-        else:
-            self.fixed_answers = bool(answers)
+        # fixed_answers is True if answers are provided, False otherwise
+        self.fixed_answers = answers is not None
+        self.round_started_with_zero_answers = len(self.answers) == 0
         # Generate answer IDs for all initial answers
         for i, ans in enumerate(self.answers):
             new_id = self._generate_short_id()
@@ -138,8 +134,11 @@ class DebateMarket(ParallelEnv):
                 dq_by_agent[ag] = np.append(dq_by_agent[ag], 0.0)
         return new_id
 
-    def _max_shares_for_amount(self, idx, amount):
-        # Binary search for max shares that can be bought for 'amount' on answer idx
+    def _max_shares_for_amount(self, idx, amount, market_was_empty):
+        # If the market was empty at the start of the step, agent is creating a new answer: equity = amount paid
+        if market_was_empty:
+            return amount
+        # Otherwise, use AMM pricing
         left, right = 0.0, 1e6  # reasonable upper bound
         for _ in range(20):
             mid = (left + right) / 2
@@ -150,6 +149,14 @@ class DebateMarket(ParallelEnv):
                 right = mid
             else:
                 left = mid
+        # If left is 0, check if a minimal share can be bought (for non-empty market)
+        if left == 0.0:
+            dq = np.zeros_like(self.q)
+            dq[idx] = 1e-8
+            cost = self.trade_cost(dq)
+            min_cost = 0.01 * len(self.answers)
+            if cost <= amount and cost >= min_cost:
+                return 1e-8
         return left
 
     def _remove_answer(self, idx):
@@ -166,9 +173,12 @@ class DebateMarket(ParallelEnv):
 
     def step(self, actions):
         self.step_count += 1
+        num_answers_at_start = len(self.answers)
+        min_investment = (
+            0.01 * num_answers_at_start if num_answers_at_start > 0 else 0.0
+        )
         rewards = {agent: 0.0 for agent in self.agents}
         self.messages_round = []
-
         dq_by_agent = {agent: np.zeros_like(self.q) for agent in self.agents}
         new_answers = {}
         new_msgs = []
@@ -199,9 +209,11 @@ class DebateMarket(ParallelEnv):
                                 request["answer_text"],
                                 float(request["amount"]),
                             )
-                            if ans_text not in new_answers:
-                                new_answers[ans_text] = []
-                            new_answers[ans_text].append((agent, amount))
+                            # Enforce minimum investment
+                            if num_answers_at_start == 0 or amount >= min_investment:
+                                if ans_text not in new_answers:
+                                    new_answers[ans_text] = []
+                                new_answers[ans_text].append((agent, amount))
                     case "buy_message":
                         msg = request["msg"]
                         price = self.message_price()
@@ -219,13 +231,15 @@ class DebateMarket(ParallelEnv):
             for ans_text, contribs in new_answers.items():
                 aid = new_answer_ids[ans_text]
                 for agent, amount in contribs:
-                    buy_requests.append((agent, aid, amount))
+                    # Set the agent's holding and market cap to the amount paid
+                    idx = self.answer_id_to_idx[aid]
+                    dq_by_agent[agent][idx] += amount
 
         # --- Process all buy requests together ---
         for agent, aid, amount in buy_requests:
             idx = self.answer_id_to_idx.get(aid)
             if idx is not None:
-                max_qty = self._max_shares_for_amount(idx, amount)
+                max_qty = self._max_shares_for_amount(idx, amount, False)
                 dq_by_agent[agent][idx] += max_qty
 
         # --- Batch clearing trades ---
@@ -280,6 +294,10 @@ class DebateMarket(ParallelEnv):
             }
             for agent in self.agents
         }
+
+        # At the end of the first step after reset, disable the zero-answers flag
+        if getattr(self, "round_started_with_zero_answers", False):
+            self.round_started_with_zero_answers = False
 
         terminations = {agent: False for agent in self.agents}
         truncations = {agent: False for agent in self.agents}

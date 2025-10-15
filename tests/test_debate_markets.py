@@ -166,7 +166,8 @@ def test_buy_new_answer_when_not_fixed(market):
 
 
 def test_answer_not_removed_if_any_agent_holds(market):
-    market.reset(question="Test?", fixed_answers=False)
+    obs, *_ = market.reset(question="Test?")
+    print(f"{obs=}")
     # Agent 0 creates a new answer
     actions = {
         "A0": json.dumps(
@@ -179,7 +180,7 @@ def test_answer_not_removed_if_any_agent_holds(market):
     own_id = next(a["id"] for a in obs["A0"]["answers"] if a["text"] == "A0 ans")
     # Agent 1 buys shares in Agent 0's answer
     actions = {
-        "A1": json.dumps([{"type": "buy_answer", "answer_id": own_id, "amount": 0.5}])
+        "A1": json.dumps([{"type": "buy_answer", "answer_id": own_id, "amount": 1.0}])
     }
     obs, *_ = market.step(actions)
     # Agent 0 sells all holdings
@@ -219,3 +220,62 @@ def test_answer_removed_when_all_agents_sell(market):
     for agent in market.agents:
         assert baz_id not in obs[agent]["holdings"]
         assert all(a["id"] != baz_id for a in obs[agent]["answers"])
+
+
+def test_minimum_cost_scales_with_num_answers():
+    import json
+
+    from deb_ai_tor.environments.debate_markets import DebateMarket
+
+    agents = ["A0"]
+    market = DebateMarket(agents=agents)
+    # No answers: should allow buying with any positive amount
+    market.reset(question="Test?")
+    actions = {
+        "A0": json.dumps(
+            [{"type": "buy_new_answer", "answer_text": "ans0", "amount": 1e-6}]
+        )
+    }
+    obs, *_ = market.step(actions)
+    answer_texts = [a["text"] for a in obs["A0"]["answers"]]
+    assert "ans0" in answer_texts
+    # Add more answers
+    for i in range(1, 4):
+        actions = {
+            "A0": json.dumps(
+                [{"type": "buy_new_answer", "answer_text": f"ans{i}", "amount": 0.1}]
+            )
+        }
+        obs, *_ = market.step(actions)
+    # Now try to buy with less than the scaled minimum
+    num_answers = len(obs["A0"]["answers"])
+    min_cost = 0.01 * num_answers
+    actions = {
+        "A0": json.dumps(
+            [
+                {
+                    "type": "buy_new_answer",
+                    "answer_text": "ans_fail",
+                    "amount": min_cost * 0.5,
+                }
+            ]
+        )
+    }
+    obs, *_ = market.step(actions)
+    answer_texts = [a["text"] for a in obs["A0"]["answers"]]
+    assert "ans_fail" not in answer_texts
+    # Now try to buy with more than the scaled minimum
+    actions = {
+        "A0": json.dumps(
+            [
+                {
+                    "type": "buy_new_answer",
+                    "answer_text": "ans_succeed",
+                    "amount": min_cost * 2,
+                }
+            ]
+        )
+    }
+    obs, *_ = market.step(actions)
+    answer_texts = [a["text"] for a in obs["A0"]["answers"]]
+    assert "ans_succeed" in answer_texts
