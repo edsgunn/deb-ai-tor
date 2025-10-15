@@ -6,9 +6,8 @@ from pettingzoo import ParallelEnv
 class DebateSandwichEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "debate_sandwich_v0"}
 
-    def __init__(self, num_agents=2):
-        self.num_agents = num_agents
-        self.agents = [f"agent_{i}" for i in range(self.num_agents)]
+    def __init__(self, agents):
+        self.agents = agents
         self.possible_agents = self.agents[:]
         self.observation_spaces = {
             agent: spaces.Text(max_length=1_000_000) for agent in self.agents
@@ -28,24 +27,37 @@ class DebateSandwichEnv(ParallelEnv):
             if key not in options:
                 raise ValueError(f"Missing required option: {key}")
         self.question = options["question"]
-        self.answers = options["answers"]
+        self.answers = {chr(65 + i): ans for i, ans in enumerate(options["answers"])}
 
         self.current_round = 0
-        observation_prompt = f"Question: {self.question}\nAnswers: {self.answers}\n"
-        observations = {agent: observation_prompt for agent in self.agents}
+        observation_message = "Which of the following answers do you think is best?\n"
+        observation_info = f"Question: {self.question}\nAnswers: {self.answers}\n"
+        observation = {
+            "message": observation_message,
+            "info": observation_info,
+        }
+        observations = {agent: observation for agent in self.agents}
         return observations
 
     def step(self, actions):
         self.current_round += 1
 
-        if self.current_round <= self.num_rounds:
-            self.initial_answers = actions
-            observations = {agent: actions for agent in self.agents}
+        if self.current_round < self.num_rounds:
+            if self.current_round == 1:
+                self.initial_answers = actions
+            if self.current_round == self.num_rounds - 1:
+                observation_message = (
+                    "Which of the following answers do you now think is best?\n"
+                )
+            else:
+                observation_message = "Debate your choice of answer\n"
+            observation = {"message": observation_message, "info": actions}
+            observations = {agent: observation for agent in self.agents}
             rewards = {agent: 0.0 for agent in self.agents}
             terminations = {agent: False for agent in self.agents}
             truncations = {agent: False for agent in self.agents}
             infos = {agent: {} for agent in self.agents}
-        if self.current_round == self.num_rounds:
+        elif self.current_round == self.num_rounds:
             self.final_answers = actions
             observations = {agent: None for agent in self.agents}
             rewards = self.get_final_rewards()
@@ -59,13 +71,13 @@ class DebateSandwichEnv(ParallelEnv):
 
     def get_final_rewards(self):
         switches_by_answer = {}
-        for answer in self.answers:
-            initial = sum(answer == val for val in self.initial_answers.values())
-            final = sum(answer == val for val in self.final_answers.values())
-            switches_by_answer[answer] = final - initial
+        for key in self.answers.keys():
+            initial = sum(key == val for val in self.initial_answers.values())
+            final = sum(key == val for val in self.final_answers.values())
+            switches_by_answer[key] = final - initial
 
         return {
-            agent: switches_by_answer.get(self.final_answers[agent], 0)
+            agent: switches_by_answer.get(self.initial_answers[agent], 0)
             for agent in self.agents
         }
 
