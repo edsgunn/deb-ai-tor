@@ -30,6 +30,10 @@ dependencies = [
   "pettingzoo",
   "gymnasium",
   "pytest",
+  "transformers",
+  "torch",
+  "accelerate",
+  "ipywidgets",
 ]
 
 [project.optional-dependencies]

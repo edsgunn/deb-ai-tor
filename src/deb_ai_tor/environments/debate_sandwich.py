@@ -71,13 +71,16 @@ class DebateSandwichEnv(ParallelEnv):
 
     def get_final_rewards(self):
         switches_by_answer = {}
+        final_by_answer = {}
         for key in self.answers.keys():
             initial = sum(key == val for val in self.initial_answers.values())
             final = sum(key == val for val in self.final_answers.values())
             switches_by_answer[key] = final - initial
+            final_by_answer[key] = final
 
         return {
             agent: switches_by_answer.get(self.initial_answers[agent], 0)
+            + final_by_answer.get(self.final_answers[agent], 0)
             for agent in self.agents
         }
 
