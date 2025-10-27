@@ -16,7 +16,8 @@ class DebateSandwichEnv(ParallelEnv):
             agent: spaces.Text(max_length=1_000_000) for agent in self.agents
         }
         self.initial_answers = None
-        self.final_answers = None
+        self.final_anwers = None
+
         self.sticking_bonus = 0.5
 
     def reset(self, seed=None, options=None):
@@ -31,7 +32,7 @@ class DebateSandwichEnv(ParallelEnv):
         self.answers = {chr(65 + i): ans for i, ans in enumerate(options["answers"])}
 
         self.current_round = 0
-        observation_message = "Which of the following answers do you think is best?\n"
+        observation_message = "Which of the following answers do you think is best? You must choose an answer even if unsure. Respond with a single letter indicating your answer\n"
         observation_info = f"Question: {self.question}\nAnswers: {self.answers}\n"
         observation = {
             "message": observation_message,
@@ -47,9 +48,7 @@ class DebateSandwichEnv(ParallelEnv):
             if self.current_round == 1:
                 self.initial_answers = actions
             if self.current_round == self.num_rounds - 1:
-                observation_message = (
-                    "Which of the following answers do you now think is best?\n"
-                )
+                observation_message = "Which of the following answers do you now think is best? You must choose an answer even if unsure. Respond with a single letter indicating your answer\n"
             else:
                 observation_message = "Debate your choice of answer\n"
             observation = {"message": observation_message, "info": actions}
