@@ -16,7 +16,8 @@ class DebateSandwichEnv(ParallelEnv):
             agent: spaces.Text(max_length=1_000_000) for agent in self.agents
         }
         self.initial_answers = None
-        self.final_anwers = None
+        self.final_answers = None
+        self.sticking_bonus = 0.5
 
     def reset(self, seed=None, options=None):
         self.state = {agent: np.zeros(4, dtype=np.float32) for agent in self.agents}
@@ -81,6 +82,11 @@ class DebateSandwichEnv(ParallelEnv):
         return {
             agent: switches_by_answer.get(self.initial_answers[agent], 0)
             + final_by_answer.get(self.final_answers[agent], 0)
+            + (
+                self.num_agents * self.sticking_bonus
+                if self.initial_answers[agent] == self.final_answers[agent]
+                else 0.0
+            )
             for agent in self.agents
         }
 
