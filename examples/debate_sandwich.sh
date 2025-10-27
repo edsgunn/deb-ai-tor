@@ -1,3 +1,5 @@
+#!/bin/bash
+
 #SBATCH --account=vjgo8416-asp-llm
 #SBATCH --qos=turing
 #SBATCH --time=5:0
