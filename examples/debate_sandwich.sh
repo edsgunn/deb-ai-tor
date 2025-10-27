@@ -13,7 +13,7 @@ module purge
 module load baskerville
 echo "Job ID: ${SLURM_JOB_ID}"
 
-python -m venv --system-site-packages venv
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -e .
