@@ -1,7 +1,10 @@
-#!/bin/bash
 #SBATCH --account=vjgo8416-asp-llm
 #SBATCH --qos=turing
 #SBATCH --time=5:0
+#SBATCH --nodes 1
+#SBATCH --gpus 1
+#SBATCH --cpus-per-gpu 36
+#SBATCH --job-name debate_sandwich
 
 set -e
 module purge
